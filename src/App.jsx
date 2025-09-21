@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useMemo } from "react";
+import { useEffect, useRef, useState, useMemo, useCallback } from "react";
 import * as posedetection from "@tensorflow-models/pose-detection";
 import * as tf from "@tensorflow/tfjs-core";
 import "@tensorflow/tfjs-backend-webgl";
@@ -24,6 +24,18 @@ const LINE_PAIRS = [
   ["left_shoulder", "right_shoulder"], ["left_hip", "right_hip"],
   ["left_shoulder", "left_hip"], ["right_shoulder", "right_hip"]
 ];
+
+// カラーパレット（見やすく色弱にも配慮）
+const COLOR_MAP = {
+  kneeL:  "#e53935", // 赤
+  kneeR:  "#1e88e5", // 青
+  hipL:   "#43a047", // 緑
+  hipR:   "#fb8c00", // オレンジ
+  trunk:  "#8e24aa", // 紫
+};
+
+// Chart.js の全体トーンを少し濃く
+ChartJS.defaults.color = "#222";
 
 // ---------- utility ----------
 function mid(A, B) {
@@ -66,6 +78,7 @@ function drawKeypoints(ctx, keypoints) {
   ctx.restore();
 }
 
+// ---------- main ----------
 export default function App() {
   const videoRef = useRef(null);
   const fileVideoRef = useRef(null);
@@ -74,11 +87,14 @@ export default function App() {
   const rafRef = useRef(null);
 
   // 記録データの保存先（お手本 / 比較）
+  const [metrics, setMetrics] = useState({kneeL:true, kneeR:true, hipL:false, hipR:false, trunk:false});
+  const [cycleNormalize, setCycleNormalize] = useState(true);
+  const [compareResult, setCompareResult] = useState(null);
+  const [compareStats, setCompareStats]   = useState(null);
+  const [compareRmse, setCompareRmse]     = useState({});
+
   const [refSamples, setRefSamples] = useState(null); // お手本
   const [cmpSamples, setCmpSamples] = useState(null); // 比較
-  const [compareSide, setCompareSide] = useState("left"); // "left" or "right"
-  const [useMinPeak, setUseMinPeak] = useState(true);     // 最小値ピークで同期
-  const [compareResult, setCompareResult] = useState(null); // {shift, rmse, chartData}
 
   const [chartTick, setChartTick] = useState(0);
   const [useCamera, setUseCamera] = useState(true);
@@ -93,8 +109,8 @@ export default function App() {
 
   // ★ 記録（時系列）関連
   const [recording, setRecording] = useState(false);
-  const recordingRef = useRef(false);                       // ← 名前を recordingRef に
-  useEffect(() => { recordingRef.current = recording; }, [recording]);  // ← 正しい同期
+  const recordingRef = useRef(false);
+  useEffect(() => { recordingRef.current = recording; }, [recording]);
 
   const samplesRef = useRef([]); // {t, kneeL,kneeR,hipL,hipR,trunk,dKnee,dHip}
   const startTimeRef = useRef(0);
@@ -220,23 +236,22 @@ export default function App() {
             ctx.restore();
 
             // ★ 記録（10Hz）
-            // 置き換え（記録部分）
             if (recordingRef.current) {
-                const now = performance.now();
-                if (now - lastSampleTimeRef.current >= SAMPLE_INTERVAL_MS) {
-                   const t = (now - startTimeRef.current) / 1000; // sec
-                   samplesRef.current.push({
-                      t: +t.toFixed(2),
-                      kneeL: kneeLSm, kneeR: kneeRSm,
-                      hipL:  hipLSm,  hipR:  hipRSm,
-                      trunk: trunkSm,
-                      dKnee, dHip,
-                    });
-                  lastSampleTimeRef.current = now;     // ← now を保存
-                  setChartTick(n => n + 1);            // 再描画
-                }
+              const now = performance.now();
+              if (now - lastSampleTimeRef.current >= SAMPLE_INTERVAL_MS) {
+                const t = (now - startTimeRef.current) / 1000; // sec
+                samplesRef.current.push({
+                  t: +t.toFixed(2),
+                  kneeL: kneeLSm, kneeR: kneeRSm,
+                  hipL:  hipLSm,  hipR:  hipRSm,
+                  trunk: trunkSm,
+                  dKnee, dHip,
+                });
+                lastSampleTimeRef.current = now;
+                setChartTick(n => n + 1);
               }
             }
+          }
         }
       } catch (e) {
         console.warn("estimatePoses error:", e?.message || e);
@@ -267,36 +282,38 @@ export default function App() {
     if (v) v.playbackRate = s;
   };
 
-// 今の samplesRef.current をディープコピーして保存
-const saveCurrentAs = (role) => {
-  if (!samplesRef.current.length) {
-    alert("記録データがありません。先に『記録開始 → 停止』してください。");
-    return;
-  }
-  const copy = samplesRef.current.map(s => ({...s}));
-  if (role === "ref") setRefSamples(copy);
-  if (role === "cmp") setCmpSamples(copy);
-};
+  // 今の samplesRef.current をディープコピーして保存
+  const saveCurrentAs = (role) => {
+    if (!samplesRef.current.length) {
+      alert("記録データがありません。先に『記録開始 → 停止』してください。");
+      return;
+    }
+    const copy = samplesRef.current.map(s => ({...s}));
+    if (role === "ref") setRefSamples(copy);
+    if (role === "cmp") setCmpSamples(copy);
+  };
 
   // ★ 記録の開始/停止/クリア/CSV保存
-  // 置き換え
   const toggleRecord = () => {
-  setRecording((r) => {
-    const next = !r;
-    if (next) {
-      // ← 記録を始める瞬間に一度だけ初期化
-      samplesRef.current = [];
-      startTimeRef.current = performance.now();
-      lastSampleTimeRef.current = 0;
-      setChartTick((n) => n + 1); // 表示も初期化
-    }
-    return next;
-  });
-};
+    setRecording((r) => {
+      const next = !r;
+      if (next) {
+        samplesRef.current = [];
+        startTimeRef.current = performance.now();
+        lastSampleTimeRef.current = 0;
+        setChartTick((n) => n + 1);
+      }
+      return next;
+    });
+  };
 
-  const clearRecord = () => { samplesRef.current = []; startTimeRef.current = 0; lastSampleTimeRef.current = 0;
+  const clearRecord = () => {
+    samplesRef.current = [];
+    startTimeRef.current = 0;
+    lastSampleTimeRef.current = 0;
     setChartTick(n => n+1);
-   };
+  };
+
   const downloadCSV = () => {
     const rows = [
       ["t(s)","kneeL","kneeR","hipL","hipR","trunk","dKnee","dHip"]
@@ -322,101 +339,144 @@ const saveCurrentAs = (role) => {
   };
   const n = (v)=> v==null ? "" : v.toFixed(3);
 
-// ユーティリティ（すでにあるなら流用OK）
-const interp1d = (tx, yx, grid) => {
-  const out = new Array(grid.length);
-  for (let i = 0, j = 0; i < grid.length; i++) {
-    const g = grid[i];
-    while (j+1 < tx.length && tx[j+1] < g) j++;
-    if (j+1 >= tx.length) { out[i] = yx[tx.length-1]; continue; }
-    const t0 = tx[j], t1 = tx[j+1];
-    const y0 = yx[j], y1 = yx[j+1];
-    const r = (g - t0) / Math.max(1e-9, (t1 - t0));
-    out[i] = y0 + (y1 - y0) * r;
-  }
-  return out;
-};
-const rmseOnOverlap = (t1, y1, t2s, y2) => {
-  const tmin = Math.max(t1[0], t2s[0]);
-  const tmax = Math.min(t1[t1.length-1], t2s[t2s.length-1]);
-  if (!(tmax > tmin)) return NaN;
-  const N = 200;
-  const grid = Array.from({length:N}, (_,i)=> tmin + (tmax-tmin)*i/(N-1));
-  const a = interp1d(t1, y1, grid);
-  const b = interp1d(t2s, y2, grid);
-  let s = 0; for (let i=0;i<N;i++){ const d=a[i]-b[i]; s+=d*d; }
-  return Math.sqrt(s/N);
-};
-// 最小 or 最大の“ピーク”インデックス（簡易）
-const findPeakIndex = (y, useMin=true) => {
-  let best=0, val=y[0];
-  for (let i=1;i<y.length;i++){
-    if (useMin ? y[i] < val : y[i] > val) { val=y[i]; best=i; }
-  }
-  return best;
-};
-
-const runCompare = () => {
-  if (!refSamples || !cmpSamples) {
-    alert("お手本と比較、両方の記録を保存してください。");
-    return;
-  }
-  const sideKey = compareSide === "left" ? {k:"kneeL", label:"kneeL"} : {k:"kneeR", label:"kneeR"};
-
-  const t1 = refSamples.map(s => s.t);
-  const y1 = refSamples.map(s => s[sideKey.k]);
-  const t2 = cmpSamples.map(s => s.t);
-  const y2 = cmpSamples.map(s => s[sideKey.k]);
-
-  if (!y1.length || !y2.length) { alert("角度データが不足しています。"); return; }
-
-  const i1 = findPeakIndex(y1, useMinPeak);
-  const i2 = findPeakIndex(y2, useMinPeak);
-  const shift = t1[i1] - t2[i2];      // 比較データを +shift で合わせる
-  const t2s = t2.map(v => v + shift);
-
-  // 表示都合：実測（お手本）の時刻上に比較データを補間して重ねる
-  const y2_on_t1 = interp1d(t2s, y2, t1);
-  const rmse = rmseOnOverlap(t1, y1, t2s, y2);
-
-  setCompareResult({
-    shift, rmse,
-    chartData: {
-      labels: t1,
-      datasets: [
-        { label:`お手本: ${sideKey.label}`, data:y1, borderWidth:2, pointRadius:0 },
-        { label:`比較(shift済): ${sideKey.label}`, data:y2_on_t1, borderWidth:2, borderDash:[6,4], pointRadius:0 },
-      ]
-    },
-    peakX: t1[i1],
-  });
-};
-
   // ★ グラフ用データ（差分中心）
   const chartData = useMemo(() => {
-  const s = samplesRef.current;
-  return {
-    labels: s.map(x => x.t),
-    datasets: [
-      { label: "左膝角度 (°)",   data: s.map(x => x.kneeL ?? null), borderWidth: 2, pointRadius: 0 },
-      { label: "右膝角度 (°)",   data: s.map(x => x.kneeR ?? null), borderWidth: 2, pointRadius: 0 },
-      { label: "左股関節角度 (°)", data: s.map(x => x.hipL  ?? null), borderWidth: 2, pointRadius: 0 },
-      { label: "右股関節角度 (°)", data: s.map(x => x.hipR  ?? null), borderWidth: 2, pointRadius: 0 },
-      { label: "体幹前傾 (°)",   data: s.map(x => x.trunk ?? null),  borderWidth: 2, pointRadius: 0 },
-    ],
-  };
-}, [chartTick]);
+    const s = samplesRef.current;
+    return {
+      labels: s.map(x => x.t),
+      datasets: [
+    { label: "左膝角度 (°)",     data: s.map(x => x.kneeL ?? null), borderWidth: 2, pointRadius: 0,
+      borderColor: COLOR_MAP.kneeL, backgroundColor: COLOR_MAP.kneeL },
+    { label: "右膝角度 (°)",     data: s.map(x => x.kneeR ?? null), borderWidth: 2, pointRadius: 0,
+      borderColor: COLOR_MAP.kneeR, backgroundColor: COLOR_MAP.kneeR },
+    { label: "左股関節角度 (°)", data: s.map(x => x.hipL  ?? null), borderWidth: 2, pointRadius: 0,
+      borderColor: COLOR_MAP.hipL,  backgroundColor: COLOR_MAP.hipL },
+    { label: "右股関節角度 (°)", data: s.map(x => x.hipR  ?? null), borderWidth: 2, pointRadius: 0,
+      borderColor: COLOR_MAP.hipR,  backgroundColor: COLOR_MAP.hipR },
+    { label: "体幹前傾 (°)",     data: s.map(x => x.trunk ?? null),  borderWidth: 2, pointRadius: 0,
+      borderColor: COLOR_MAP.trunk, backgroundColor: COLOR_MAP.trunk },
+      ],
+    };
+  }, [chartTick]);
 
   const chartOptions = {
     responsive: true,
     maintainAspectRatio: false,
     animation: false,
     scales: {
-      x: { title: { display: true, text: "時間 (秒)" } },
-      y: { title: { display: true, text: "角度 (°)" } },
+  x: { title: { display: true, text: "時間 (秒)" }, grid: { color: "#eee" }, ticks:{ color:"#333" } },
+  y: { title: { display: true, text: "角度 (°)"   }, grid: { color: "#eee" }, ticks:{ color:"#333" } },
     },
-    plugins: { legend: { position: "top" } },
+plugins: {
+  legend: { position: "top", labels: { usePointStyle: true, boxWidth: 10 } },
+  tooltip: {
+    callbacks: { label: (ctx) => `${ctx.dataset.label}: ${ctx.formattedValue}°` }
+  }
+},
   };
+
+  // ---------- 比較（ここが肝） ----------
+  const runCompareMulti = useCallback(() => {
+    console.log("runCompareMulti clicked", { mode: cycleNormalize ? "cycle" : "time", metrics });
+    if (!refSamples || !cmpSamples) return;
+
+    const metricsList = Object.keys(metrics).filter(k => metrics[k]);
+    const res = { labels: [], datasets: [] };
+    const rmseRes = {};
+    const stats = { mode: cycleNormalize ? "cycle" : "time" };
+
+    if (cycleNormalize) {
+      // --- サイクル正規化（谷検出） ---
+      const refT = refSamples.map(s => s.t);
+      const cmpT = cmpSamples.map(s => s.t);
+
+      for (const key of metricsList) {
+        const refYraw = refSamples.map(s => s[key] ?? null).filter(v => v != null);
+        const cmpYraw = cmpSamples.map(s => s[key] ?? null).filter(v => v != null);
+        if (!refYraw.length || !cmpYraw.length) continue;
+
+        const refPeaks = findLocalMinima(refT, refYraw, { prominence: 5, minGapSec: 0.30 });
+        const cmpPeaks = findLocalMinima(cmpT, cmpYraw, { prominence: 5, minGapSec: 0.30 });
+
+        const refC = cyclesNormalize(refT, refYraw, refPeaks);
+        const cmpC = cyclesNormalize(cmpT, cmpYraw, cmpPeaks);
+        if (!(refC.length && cmpC.length)) continue;
+
+        const N = refC[0].normT.length;
+        const avgRef = Array(N).fill(0);
+        const avgCmp = Array(N).fill(0);
+        for (const c of refC) c.normV.forEach((v, i) => (avgRef[i] += v / refC.length));
+        for (const c of cmpC) c.normV.forEach((v, i) => (avgCmp[i] += v / cmpC.length));
+
+        rmseRes[key] = rmse(avgRef, avgCmp);
+
+        res.labels = refC[0].normT.map(x => (x * 100).toFixed(0));
+        const col = COLOR_MAP[key] || "#666";
+        res.datasets.push({
+            label:`お手本:${key}`, data:avgRef, borderWidth:2.5, pointRadius:0,
+              borderColor: col, backgroundColor: col
+              });
+        res.datasets.push({
+            label:`比較:${key}`,   data:avgCmp, borderWidth:2.5, pointRadius:0,
+            borderColor: col, backgroundColor: col, borderDash:[6,4]
+            });
+        stats.ref = {
+          count: refC.length,
+          avg: avg(refC.map(c => c.dur)),
+          sd: stdev(refC.map(c => c.dur)),
+          min: Math.min(...refC.map(c => c.dur)),
+          max: Math.max(...refC.map(c => c.dur)),
+          cadence: 60 / avg(refC.map(c => c.dur)),
+        };
+        stats.cmp = {
+          count: cmpC.length,
+          avg: avg(cmpC.map(c => c.dur)),
+          sd: stdev(cmpC.map(c => c.dur)),
+          min: Math.min(...cmpC.map(c => c.dur)),
+          max: Math.max(...cmpC.map(c => c.dur)),
+          cadence: 60 / avg(cmpC.map(c => c.dur)),
+        };
+      }
+    } else {
+      // --- 時間比較（サイクル正規化OFF）---
+      const refT = refSamples.map(s => s.t);
+      const cmpT = cmpSamples.map(s => s.t);
+      res.labels = refT.map(t => t.toFixed(2));
+
+      for (const key of metricsList) {
+        const refY    = refSamples.map(s => s[key] ?? null);
+        const cmpYraw = cmpSamples.map(s => s[key] ?? null);
+        const cmpYseries = fillNaLinear(cmpT, cmpYraw);
+        const cmpY       = refT.map(t => linInterp(t, cmpT, cmpYseries));
+
+        rmseRes[key] = rmse(
+          refY.filter(v => v != null),
+          cmpY.filter(v => v != null)
+        );
+
+        const col = COLOR_MAP[key] || "#666";
+        res.datasets.push({
+            label: `お手本:${key}`, data: refY, borderWidth: 2.5, pointRadius: 0,
+              borderColor: col, backgroundColor: col
+              });
+        res.datasets.push({
+            label: `比較:${key}`,   data: cmpY, borderWidth: 2.5, pointRadius: 0,
+            borderColor: col, backgroundColor: col, borderDash: [6, 4]
+            });
+}
+    }
+
+    if (!res.datasets.length) {
+      setCompareResult(null);
+      setCompareStats(null);
+      alert("比較に必要なデータが得られませんでした。記録を少し長めにするか、指標を1つに絞って再試行してください。");
+      return;
+    }
+
+    setCompareRmse(rmseRes);
+    setCompareResult({ chartData: res });
+    setCompareStats(stats);
+  }, [refSamples, cmpSamples, metrics, cycleNormalize]);
 
   return (
     <div style={{ fontFamily:"system-ui, sans-serif", padding:16 }}>
@@ -437,7 +497,7 @@ const runCompare = () => {
           <button onClick={playPause}>{playing ? "⏸ 一時停止" : "▶ 再生"}</button>
           <button onClick={replay}>⟲ リプレイ</button>
           <span>速度:</span>
-          {[0.5, 1, 1.5, 2].map(s => (
+          {[0.25, 0.5, ,0.75 ,1].map(s => (
             <button key={s} onClick={()=>changeSpeed(s)} disabled={speed===s}>{s}x</button>
           ))}
         </div>
@@ -455,50 +515,99 @@ const runCompare = () => {
         </span>
       </div>
 
-      {/* ここを既存UIの下あたりに追加 */}
-<div style={{ marginTop:10, display:"flex", gap:8, flexWrap:"wrap", alignItems:"center" }}>
-  <button onClick={()=>saveCurrentAs("ref")} disabled={!samplesRef.current.length}>この記録を「お手本」に保存</button>
-  <button onClick={()=>saveCurrentAs("cmp")} disabled={!samplesRef.current.length}>この記録を「比較」に保存</button>
+      {/* 保存UI */}
+      <div style={{ marginTop:10, display:"flex", gap:8, flexWrap:"wrap", alignItems:"center" }}>
+        <button onClick={()=>saveCurrentAs("ref")} disabled={!samplesRef.current.length}>この記録を「お手本」に保存</button>
+        <button onClick={()=>saveCurrentAs("cmp")} disabled={!samplesRef.current.length}>この記録を「比較」に保存</button>
 
-  <span style={{marginLeft:8, color:"#333"}}>
-    保存状況：お手本 {refSamples? "✅": "❌"} / 比較 {cmpSamples? "✅": "❌"}
-  </span>
-</div>
+        <span style={{marginLeft:8, color:"#333"}}>
+          保存状況：お手本 {refSamples? "✅": "❌"} / 比較 {cmpSamples? "✅": "❌"}
+        </span>
+      </div>
 
-{/* 比較パネル */}
-<div style={{marginTop:12, padding:12, border:"1px solid #eee", borderRadius:8}}>
-  <div style={{display:"flex", gap:12, alignItems:"center", flexWrap:"wrap"}}>
-    <div>膝側：
-      <select value={compareSide} onChange={e=>setCompareSide(e.target.value)}>
-        <option value="left">左</option>
-        <option value="right">右</option>
-      </select>
-    </div>
-    <label>
-      <input type="checkbox" checked={useMinPeak} onChange={e=>setUseMinPeak(e.target.checked)} />
-      最小値ピークで同期（外すと最大）
-    </label>
-    <button onClick={runCompare} disabled={!refSamples || !cmpSamples}>比較（ピーク同期）</button>
-    {compareResult && (
-      <span style={{marginLeft:8}}>
-        RMSE: {compareResult.rmse?.toFixed(2)}° / shift: {compareResult.shift?.toFixed(3)}s
-      </span>
-    )}
-  </div>
+      {/* 比較パネル */}
+      <div style={{marginTop:12, padding:12, border:"1px solid #eee", borderRadius:8}}>
+        <div style={{display:'flex', gap:12, flexWrap:'wrap', alignItems:'center'}}>
+          {[
+            {key:'kneeL', label:'左膝'}, {key:'kneeR', label:'右膝'},
+            {key:'hipL',  label:'左股'}, {key:'hipR',  label:'右股'},
+            {key:'trunk', label:'体幹前傾'},
+          ].map(m => (
+            <label key={m.key}>
+              <input
+                type="checkbox"
+                checked={metrics[m.key] ?? true}
+                onChange={e => setMetrics(v => ({ ...v, [m.key]: e.target.checked }))}
+              />
+              {m.label}
+            </label>
+          ))}
 
-  {compareResult && (
-    <div style={{ height: 260, marginTop: 8, background:"#fafafa", border:"1px solid #eee", borderRadius:8, padding:8 }}>
-      <Line
-        data={compareResult.chartData}
-        options={{
-          responsive:true, maintainAspectRatio:false, animation:false,
-          scales:{ x:{ title:{display:true, text:"時間 (秒)"}}, y:{ title:{display:true, text:"角度 (°)"}}},
-          plugins:{ legend:{ position:"top" } }
-        }}
-      />
-    </div>
-  )}
-</div>
+          <label style={{marginLeft:8}}>
+            <input
+              type="checkbox"
+              checked={cycleNormalize}
+              onChange={e => setCycleNormalize(e.target.checked)}
+            />
+            サイクル正規化（0–100%）
+          </label>
+
+          <button onClick={runCompareMulti} disabled={!refSamples || !cmpSamples}>
+            比較（グラフ）
+          </button>
+
+          {compareResult && (
+            <span style={{marginLeft:8}}>
+              {Object.entries(compareRmse).map(([k,v]) => (
+                <span key={k} style={{marginRight:10}}>{k}: RMSE {v?.toFixed(2)}°</span>
+              ))}
+            </span>
+          )}
+        </div>
+
+        {/* サイクル統計（正規化ONのとき表示） */}
+        {compareStats?.mode === 'cycle' && (
+          <div style={{marginTop:6}}>
+            <table style={{fontSize:14}}>
+              <thead>
+                <tr>
+                  <th></th><th>サイクル数</th><th>平均(s)</th><th>SD</th>
+                  <th>最短</th><th>最長</th><th>ケイデンス(回/分)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {['ref','cmp'].map(tag=>{
+                  const s=compareStats[tag]; if(!s) return null;
+                  return (
+                    <tr key={tag}>
+                      <td>{tag==='ref'?'お手本':'比較'}</td>
+                      <td>{s.count}</td><td>{s.avg.toFixed(2)}</td><td>{s.sd.toFixed(2)}</td>
+                      <td>{s.min.toFixed(2)}</td><td>{s.max.toFixed(2)}</td><td>{s.cadence.toFixed(1)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {/* グラフ */}
+        {compareResult && (
+          <div style={{ height: 280, marginTop: 8, background:"#fafafa", border:"1px solid #eee", borderRadius:8, padding:8 }}>
+            <Line
+              data={compareResult.chartData}
+              options={{
+                responsive:true, maintainAspectRatio:false, animation:false,
+                scales:{
+                  x:{ title:{display:true, text: cycleNormalize ? 'サイクル(%)' : '時間(秒)'} },
+                  y:{ title:{display:true, text:'角度(°)'} }
+                },
+                plugins:{ legend:{ position:'top' } }
+              }}
+            />
+          </div>
+        )}
+      </div>
 
       {/* 隠しvideo */}
       <video ref={videoRef} playsInline muted style={{ display:"none" }} />
@@ -519,3 +628,81 @@ const runCompare = () => {
     </div>
   );
 }
+
+// ---------- 比較ロジック関数（コンポーネント外の共通関数） ----------
+
+// 線形補間
+function linInterp(x, xp, yp) {
+  if (!xp.length || !yp.length) return null;
+  if (x <= xp[0]) return yp[0];
+  if (x >= xp[xp.length-1]) return yp[yp.length-1];
+  let i = 1;
+  while (i < xp.length && xp[i] < x) i++;
+  const x0 = xp[i-1], x1 = xp[i];
+  const y0 = yp[i-1], y1 = yp[i];
+  return y0 + (y1-y0) * (x-x0)/(x1-x0);
+}
+
+// ★ 補間用に null を軽く埋める（端は最近傍、内部は線形）
+function fillNaLinear(xp, yp) {
+  const y = yp.slice();
+  let i = 0; while (i < y.length && y[i] == null) i++;
+  if (i > 0 && i < y.length) for (let k = 0; k < i; k++) y[k] = y[i];
+  let j = y.length - 1; while (j >= 0 && y[j] == null) j--;
+  if (j >= 0 && j < y.length - 1) for (let k = j + 1; k < y.length; k++) y[k] = y[j];
+  for (let a = 0; a < y.length; a++) if (y[a] == null) {
+    let b = a; while (b < y.length && y[b] == null) b++;
+    const y0 = y[a - 1], y1 = y[b], x0 = xp[a - 1], x1 = xp[b];
+    for (let k = a; k < b; k++) y[k] = y0 + (y1 - y0) * (xp[k] - x0) / (x1 - x0);
+    a = b;
+  }
+  return y;
+}
+
+// 極小値（谷）の検出：時間ベース
+function findLocalMinima(t, y, {prominence=8, minGapSec=0.35} = {}) {
+  const idxs = [];
+  for (let i = 1; i < y.length - 1; i++) {
+    if (y[i] <= y[i-1] && y[i] <= y[i+1]) idxs.push(i);
+  }
+  const kept = [];
+  let lastKeepT = -1e9;
+  for (const i of idxs) {
+    const left = Math.max(0, i-10), right = Math.min(y.length-1, i+10);
+    const leftMax  = Math.max(...y.slice(left, i));
+    const rightMax = Math.max(...y.slice(i+1, right+1));
+    const prom = Math.min(leftMax - y[i], rightMax - y[i]);
+    if (prom >= prominence && (t[i] - lastKeepT) >= minGapSec) {
+      kept.push(i);
+      lastKeepT = t[i];
+    }
+  }
+  return kept; // 返り値はインデックス配列
+}
+
+// サイクルごとの正規化 (0-100%)
+function cyclesNormalize(times, values, peaks, N=100) {
+  const cycles = [];
+  for (let c=0; c<peaks.length-1; c++) {
+    const t0 = times[peaks[c]], t1 = times[peaks[c+1]];
+    const normT = Array.from({length:N}, (_,i)=>i/(N-1));
+    const normV = normT.map(frac => {
+      const targetT = t0 + frac*(t1-t0);
+      return linInterp(targetT, times, values);
+    });
+    cycles.push({normT, normV, dur:t1-t0});
+  }
+  return cycles;
+}
+
+// RMSE
+function rmse(arr1, arr2) {
+  const n = Math.min(arr1.length, arr2.length);
+  if (n===0) return null;
+  let s=0; for (let i=0;i<n;i++){const d=arr1[i]-arr2[i]; s+=d*d;}
+  return Math.sqrt(s/n);
+}
+
+// 平均と標準偏差
+function avg(arr){return arr.reduce((a,b)=>a+b,0)/arr.length;}
+function stdev(arr){const m=avg(arr);return Math.sqrt(avg(arr.map(v=>(v-m)**2)));}
