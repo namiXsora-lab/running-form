@@ -100,6 +100,10 @@ export default function App() {
   const [speed, setSpeed] = useState(1);
   const runningRef = useRef(false);
 
+  const [powerSave, setPowerSave] = useState(true);   // 省エネモード ON/OFF
+  const lastDetectRef = useRef(0);                    // 最後に推論した時刻を保持
+  const detCanvasRef = useRef(null);                  // 縮小用キャンバス
+
   // スムージング用
   const kneeLBufRef  = useRef([]);  const kneeRBufRef  = useRef([]);
   const hipLBufRef   = useRef([]);  const hipRBufRef   = useRef([]);
@@ -135,6 +139,19 @@ export default function App() {
     return () => stop();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    const onVis = () => {
+      if (document.hidden) {
+        runningRef.current = false;
+        cancelAnimationFrame(rafRef.current);
+      } else if ((useCamera || fileVideoRef.current?.src) && detectorRef.current) {
+        startLoop(useCamera ? videoRef.current : fileVideoRef.current);
+      }
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, [useCamera]);
 
   const startCamera = async () => {
     setUseCamera(true);
@@ -199,7 +216,27 @@ export default function App() {
       ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
 
       try {
-        const poses = await detectorRef.current.estimatePoses(videoEl, { maxPoses: 1, flipHorizontal: false });
+        // --- 省エネ処理追加 ---
+        const nowTs = performance.now();
+        const interval = powerSave ? 100 : 33; // 省エネ時=10fps, 通常=30fps
+        const shouldDetect = (nowTs - lastDetectRef.current) >= interval;
+
+        if (!detCanvasRef.current) {
+          detCanvasRef.current = document.createElement("canvas");
+        }
+        const detCanvas = detCanvasRef.current;
+        const scale = powerSave ? 0.35 : 0.5;  // 縮小率（例: 35% or 50%）
+        detCanvas.width  = Math.max(160, Math.floor(canvas.width  * scale));
+        detCanvas.height = Math.max(120, Math.floor(canvas.height * scale));
+        const dctx = detCanvas.getContext("2d");
+        dctx.drawImage(videoEl, 0, 0, detCanvas.width, detCanvas.height);
+
+        let poses = [];
+        if (shouldDetect) {
+            poses = await detectorRef.current.estimatePoses(detCanvas, { maxPoses: 1, flipHorizontal: false });
+            lastDetectRef.current = nowTs;
+        }
+        // ----------------------
         if (poses[0]?.keypoints?.length) {
           drawKeypoints(ctx, poses[0].keypoints);
 
@@ -522,6 +559,17 @@ export default function App() {
           ))}
         </div>
       )}
+
+       {/* 👇追加 */}
+       <label style={{ marginLeft: 8 }}>
+          <input
+            type="checkbox"
+            checked={powerSave}
+            onChange={e => setPowerSave(e.target.checked)}
+          />
+          省エネモード（発熱を抑える）
+        </label>
+      </div>
 
       {/* ★ 記録系のUI */}
       <div style={{ marginTop:10, display:"flex", gap:8, alignItems:"center", flexWrap:"wrap" }}>
