@@ -56,7 +56,7 @@ function movingAvg(buf, val, max = 5) {
   return buf.reduce((a, b) => a + b, 0) / buf.length;
 }
 
-// 骨格を描く「だけ」
+// 骨格を描く
 function drawKeypoints(ctx, keypoints) {
   const byName = Object.fromEntries(keypoints.map(k => [k.name, k]));
   ctx.save();
@@ -75,6 +75,11 @@ function drawKeypoints(ctx, keypoints) {
     }
   });
   ctx.restore();
+}
+
+// 表示サイズに合わせてキーポイントを拡大縮小
+function scaleKeypoints(keypoints, sx, sy) {
+  return keypoints.map(k => ({ ...k, x: k.x * sx, y: k.y * sy }));
 }
 
 export default function App() {
@@ -100,10 +105,6 @@ export default function App() {
   const [speed, setSpeed] = useState(1);
   const runningRef = useRef(false);
 
-  const [powerSave, setPowerSave] = useState(true);   // 省エネモード ON/OFF
-  const lastDetectRef = useRef(0);                    // 最後に推論した時刻を保持
-  const detCanvasRef = useRef(null);                  // 縮小用キャンバス
-
   // スムージング用
   const kneeLBufRef  = useRef([]);  const kneeRBufRef  = useRef([]);
   const hipLBufRef   = useRef([]);  const hipRBufRef   = useRef([]);
@@ -125,6 +126,7 @@ export default function App() {
   const [coachLoading, setCoachLoading] = useState(false);
   const [coachError, setCoachError] = useState(null);
 
+  // モデル初期化
   useEffect(() => {
     (async () => {
       await import("@tensorflow/tfjs-backend-webgl");
@@ -140,6 +142,7 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // タブ非表示→推論停止、復帰→再開
   useEffect(() => {
     const onVis = () => {
       if (document.hidden) {
@@ -162,8 +165,9 @@ export default function App() {
       catch(e){ console.warn("getUserMedia failed:", e?.name||e); return null; }
     };
 
-    let stream = await tryGet({ video:{ facingMode:{ideal:"environment"}, width:{ideal:960}, height:{ideal:540} }, audio:false });
-    if (!stream) stream = await tryGet({ video:{ facingMode:{ideal:"user"},        width:{ideal:960}, height:{ideal:540} }, audio:false });
+    // 高精度優先：できるだけ大きめを試す（端末依存）
+    let stream = await tryGet({ video:{ facingMode:{ideal:"environment"}, width:{ideal:1280}, height:{ideal:720} }, audio:false });
+    if (!stream) stream = await tryGet({ video:{ facingMode:{ideal:"user"}, width:{ideal:1280}, height:{ideal:720} }, audio:false });
     if (!stream) stream = await tryGet({ video:true, audio:false });
 
     if (!stream) { alert("カメラにアクセスできませんでした。まずは『動画ファイル読込』で確認してください。"); return; }
@@ -192,6 +196,7 @@ export default function App() {
     if (v?.srcObject) { v.srcObject.getTracks().forEach(t=>t.stop()); v.srcObject = null; }
   };
 
+  // ===== 高精度優先の推論ループ（毎フレーム推論・スケール整合）=====
   const startLoop = (videoEl) => {
     if (!detectorRef.current) return;
     runningRef.current = true;
@@ -207,40 +212,31 @@ export default function App() {
         return;
       }
 
-      if (canvas.width !== videoEl.videoWidth || canvas.height !== videoEl.videoHeight) {
-        canvas.width = videoEl.videoWidth || 960;
-        canvas.height = videoEl.videoHeight || 540;
+      // 表示キャンバスを動画の実サイズに追従（ズレ防止）
+      const vw = videoEl.videoWidth || 960;
+      const vh = videoEl.videoHeight || 540;
+      if (canvas.width !== vw || canvas.height !== vh) {
+        canvas.width = vw;
+        canvas.height = vh;
       }
 
+      // 背景に動画を描画
       ctx.clearRect(0,0,canvas.width,canvas.height);
       ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
 
       try {
-        // --- 省エネ処理追加 ---
-        const nowTs = performance.now();
-        const interval = powerSave ? 100 : 33; // 省エネ時=10fps, 通常=30fps
-        const shouldDetect = (nowTs - lastDetectRef.current) >= interval;
+        // ★毎フレーム推論（間引きなし）
+        const poses = await detectorRef.current.estimatePoses(videoEl, { maxPoses: 1, flipHorizontal: false });
 
-        if (!detCanvasRef.current) {
-          detCanvasRef.current = document.createElement("canvas");
-        }
-        const detCanvas = detCanvasRef.current;
-        const scale = powerSave ? 0.35 : 0.5;  // 縮小率（例: 35% or 50%）
-        detCanvas.width  = Math.max(160, Math.floor(canvas.width  * scale));
-        detCanvas.height = Math.max(120, Math.floor(canvas.height * scale));
-        const dctx = detCanvas.getContext("2d");
-        dctx.drawImage(videoEl, 0, 0, detCanvas.width, detCanvas.height);
-
-        let poses = [];
-        if (shouldDetect) {
-            poses = await detectorRef.current.estimatePoses(detCanvas, { maxPoses: 1, flipHorizontal: false });
-            lastDetectRef.current = nowTs;
-        }
-        // ----------------------
         if (poses[0]?.keypoints?.length) {
-          drawKeypoints(ctx, poses[0].keypoints);
+          // videoEl座標系＝canvas座標系なのでスケール=1
+          const kpsScaled = poses[0].keypoints; // そのまま
 
-          const kp = Object.fromEntries(poses[0].keypoints.map(k => [k.name, k]));
+          // 常に骨格を描画（見栄え優先）
+          drawKeypoints(ctx, kpsScaled);
+
+          // 角度計算
+          const kp = Object.fromEntries(kpsScaled.map(k => [k.name, k]));
           const LHIP = kp["left_hip"],  LKN = kp["left_knee"],  LAN = kp["left_ankle"];
           const RHIP = kp["right_hip"], RKN = kp["right_knee"], RAN = kp["right_ankle"];
           const LSH  = kp["left_shoulder"],  RSH = kp["right_shoulder"];
@@ -276,7 +272,7 @@ export default function App() {
             ctx.fillText(`体幹前傾: ${f(trunkSm)}°`, 20, 82);
             ctx.restore();
 
-            // ★ 記録（10Hz）
+            // 記録（10Hz）
             if (recordingRef.current) {
               const now = performance.now();
               if (now - lastSampleTimeRef.current >= SAMPLE_INTERVAL_MS) {
@@ -297,7 +293,6 @@ export default function App() {
       } catch (e) {
         console.warn("estimatePoses error:", e?.message || e);
       }
-
       rafRef.current = requestAnimationFrame(render);
     };
     render();
@@ -339,7 +334,6 @@ export default function App() {
     setRecording((r) => {
       const next = !r;
       if (next) {
-        // 記録を始める瞬間に一度だけ初期化
         samplesRef.current = [];
         startTimeRef.current = performance.now();
         lastSampleTimeRef.current = 0;
@@ -508,13 +502,12 @@ export default function App() {
       setCompareResult(null);
       setCompareStats(null);
       alert("比較に必要なデータが得られませんでした。記録時間を少し長くするか、指標を減らして再試行してください。");
-      return;
+    } else {
+      setCompareRmse(rmseRes);
+      setCompareResult({ chartData: res });
+      setCompareStats(stats);
+      if (autoCoach) generateCoachNotes(rmseRes, stats, metrics, cycleNormalize);
     }
-    setCompareRmse(rmseRes);
-    setCompareResult({ chartData: res });
-    setCompareStats(stats);
-
-    if (autoCoach) generateCoachNotes(rmseRes, stats, metrics, cycleNormalize);
   }, [refSamples, cmpSamples, metrics, cycleNormalize, autoCoach]);
 
   // ---- 生成AIコメント（まずはローカルのヒューリスティックで） ----
@@ -559,17 +552,6 @@ export default function App() {
           ))}
         </div>
       )}
-
-       {/* 👇追加 */}
-       <label style={{ marginLeft: 8 }}>
-          <input
-            type="checkbox"
-            checked={powerSave}
-            onChange={e => setPowerSave(e.target.checked)}
-          />
-          省エネモード（発熱を抑える）
-        </label>
-      </div>
 
       {/* ★ 記録系のUI */}
       <div style={{ marginTop:10, display:"flex", gap:8, alignItems:"center", flexWrap:"wrap" }}>
@@ -735,7 +717,7 @@ function linInterp(x, xp, yp) {
   return y0 + (y1-y0) * (x-x0)/(x1-x0);
 }
 
-// ★ 補間用に null を軽く埋める（端は最近傍、内部は線形）
+// 補間用に null を軽く埋める（端は最近傍、内部は線形）
 function fillNaLinear(xp, yp) {
   const y = yp.slice();
   let i = 0; while (i < y.length && y[i] == null) i++;
