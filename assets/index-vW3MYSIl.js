@@ -1,1 +1,0 @@
-import{G as t,M as o,f as l,g,s as n,w as r,a as b}from"./index-D0n5U-YX.js";/** @license See the LICENSE file. */const e="4.22.0";export{t as GPGPUContext,o as MathBackendWebGL,l as forceHalfFloat,g as gpgpu_util,n as setWebGLContext,e as version_webgl,r as webgl,b as webgl_util};
