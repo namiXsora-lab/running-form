@@ -1,4 +1,3 @@
-// App.jsx
 import { useEffect, useRef, useState, useMemo, useCallback } from "react";
 import * as posedetection from "@tensorflow-models/pose-detection";
 import * as tf from "@tensorflow/tfjs-core";
@@ -16,8 +15,8 @@ import {
 } from "chart.js";
 import { Line } from "react-chartjs-2";
 ChartJS.register(LineElement, PointElement, LinearScale, CategoryScale, Legend, Tooltip);
-ChartJS.defaults.color = "#222"; // 全体トーン
 
+// スケルトン描画用の接続ペア
 const LINE_PAIRS = [
   ["left_shoulder", "left_elbow"], ["left_elbow", "left_wrist"],
   ["right_shoulder", "right_elbow"], ["right_elbow", "right_wrist"],
@@ -26,15 +25,6 @@ const LINE_PAIRS = [
   ["left_shoulder", "right_shoulder"], ["left_hip", "right_hip"],
   ["left_shoulder", "left_hip"], ["right_shoulder", "right_hip"]
 ];
-
-// 見やすいカラーパレット
-const COLOR_MAP = {
-  kneeL:  "#e53935", // 赤
-  kneeR:  "#1e88e5", // 青
-  hipL:   "#43a047", // 緑
-  hipR:   "#fb8c00", // オレンジ
-  trunk:  "#8e24aa", // 紫
-};
 
 // ---------- utility ----------
 function mid(A, B) {
@@ -56,13 +46,13 @@ function movingAvg(buf, val, max = 5) {
   return buf.reduce((a, b) => a + b, 0) / buf.length;
 }
 
-// 骨格を描く
+// 骨格を描画（空色系で見やすく）
 function drawKeypoints(ctx, keypoints) {
   const byName = Object.fromEntries(keypoints.map(k => [k.name, k]));
   ctx.save();
   ctx.lineWidth = 3;
-  ctx.strokeStyle = "rgba(0,0,0,0.9)";
-  ctx.fillStyle   = "rgba(0,0,0,0.9)";
+  ctx.strokeStyle = "#2A6EBB";
+  ctx.fillStyle   = "#2A6EBB";
   keypoints.forEach((k) => {
     if (k.score != null && k.score > 0.3) {
       ctx.beginPath(); ctx.arc(k.x, k.y, 4, 0, 2*Math.PI); ctx.fill();
@@ -77,11 +67,6 @@ function drawKeypoints(ctx, keypoints) {
   ctx.restore();
 }
 
-// 表示サイズに合わせてキーポイントを拡大縮小
-function scaleKeypoints(keypoints, sx, sy) {
-  return keypoints.map(k => ({ ...k, x: k.x * sx, y: k.y * sy }));
-}
-
 export default function App() {
   const videoRef = useRef(null);
   const fileVideoRef = useRef(null);
@@ -89,13 +74,12 @@ export default function App() {
   const detectorRef = useRef(null);
   const rafRef = useRef(null);
 
-  // 記録データの保存先（お手本 / 比較）
+  // 状態
   const [metrics, setMetrics] = useState({kneeL:true, kneeR:true, hipL:false, hipR:false, trunk:false});
-  const [cycleNormalize, setCycleNormalize] = useState(true);
+  const [cycleNormalize, setCycleNormalize] = useState(true); // 「動きを1回分に揃えて比較（平均フォーム）」
   const [compareResult, setCompareResult] = useState(null);
   const [compareStats, setCompareStats]   = useState(null);
   const [compareRmse, setCompareRmse]     = useState({});
-
   const [refSamples, setRefSamples] = useState(null); // お手本
   const [cmpSamples, setCmpSamples] = useState(null); // 比較
 
@@ -105,12 +89,12 @@ export default function App() {
   const [speed, setSpeed] = useState(1);
   const runningRef = useRef(false);
 
-  // スムージング用
+  // スムージングバッファ
   const kneeLBufRef  = useRef([]);  const kneeRBufRef  = useRef([]);
   const hipLBufRef   = useRef([]);  const hipRBufRef   = useRef([]);
   const trunkBufRef  = useRef([]);
 
-  // ★ 記録（時系列）関連
+  // 記録
   const [recording, setRecording] = useState(false);
   const recordingRef = useRef(false);
   useEffect(() => { recordingRef.current = recording; }, [recording]);
@@ -118,15 +102,9 @@ export default function App() {
   const samplesRef = useRef([]); // {t, kneeL,kneeR,hipL,hipR,trunk,dKnee,dHip}
   const startTimeRef = useRef(0);
   const lastSampleTimeRef = useRef(0);
-  const SAMPLE_INTERVAL_MS = 100; // 10Hzで記録
+  const SAMPLE_INTERVAL_MS = 100; // 10Hz
 
-  // 🧡 コーチ（生成コメント）関連
-  const [autoCoach, setAutoCoach] = useState(true);
-  const [coachNotes, setCoachNotes] = useState(null);
-  const [coachLoading, setCoachLoading] = useState(false);
-  const [coachError, setCoachError] = useState(null);
-
-  // モデル初期化
+  // TFJS + Detector init
   useEffect(() => {
     (async () => {
       await import("@tensorflow/tfjs-backend-webgl");
@@ -142,20 +120,21 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // タブ非表示→推論停止、復帰→再開
-  useEffect(() => {
-    const onVis = () => {
-      if (document.hidden) {
-        runningRef.current = false;
-        cancelAnimationFrame(rafRef.current);
-      } else if ((useCamera || fileVideoRef.current?.src) && detectorRef.current) {
-        startLoop(useCamera ? videoRef.current : fileVideoRef.current);
-      }
-    };
-    document.addEventListener("visibilitychange", onVis);
-    return () => document.removeEventListener("visibilitychange", onVis);
-  }, [useCamera]);
+  // 共通ボタンスタイル（SoraLab 空色）
+  const buttonStyle = {
+    background:"#6DBFF2",
+    color:"#fff",
+    border:"none",
+    borderRadius:"8px",
+    padding:"8px 16px",
+    cursor:"pointer",
+    fontSize:"14px",
+    margin:"2px",
+    boxShadow:"0 2px 4px rgba(0,0,0,0.1)",
+    transition:"background 0.2s"
+  };
 
+  // カメラ開始
   const startCamera = async () => {
     setUseCamera(true);
     const v = videoRef.current;
@@ -165,9 +144,8 @@ export default function App() {
       catch(e){ console.warn("getUserMedia failed:", e?.name||e); return null; }
     };
 
-    // 高精度優先：できるだけ大きめを試す（端末依存）
-    let stream = await tryGet({ video:{ facingMode:{ideal:"environment"}, width:{ideal:1280}, height:{ideal:720} }, audio:false });
-    if (!stream) stream = await tryGet({ video:{ facingMode:{ideal:"user"}, width:{ideal:1280}, height:{ideal:720} }, audio:false });
+    let stream = await tryGet({ video:{ facingMode:{ideal:"environment"}, width:{ideal:960}, height:{ideal:540} }, audio:false });
+    if (!stream) stream = await tryGet({ video:{ facingMode:{ideal:"user"},        width:{ideal:960}, height:{ideal:540} }, audio:false });
     if (!stream) stream = await tryGet({ video:true, audio:false });
 
     if (!stream) { alert("カメラにアクセスできませんでした。まずは『動画ファイル読込』で確認してください。"); return; }
@@ -176,6 +154,7 @@ export default function App() {
     v.onloadedmetadata = async () => { await v.play(); setPlaying(true); startLoop(v); };
   };
 
+  // 動画ファイル読み込み
   const loadFile = async (e) => {
     setUseCamera(false);
     const file = e.target.files?.[0];
@@ -188,6 +167,7 @@ export default function App() {
     v.onloadedmetadata = async () => { await v.play(); setPlaying(true); startLoop(v); };
   };
 
+  // 停止
   const stop = () => {
     runningRef.current = false;
     cancelAnimationFrame(rafRef.current);
@@ -196,7 +176,7 @@ export default function App() {
     if (v?.srcObject) { v.srcObject.getTracks().forEach(t=>t.stop()); v.srcObject = null; }
   };
 
-  // ===== 高精度優先の推論ループ（毎フレーム推論・スケール整合）=====
+  // 推論ループ開始
   const startLoop = (videoEl) => {
     if (!detectorRef.current) return;
     runningRef.current = true;
@@ -212,31 +192,23 @@ export default function App() {
         return;
       }
 
-      // 表示キャンバスを動画の実サイズに追従（ズレ防止）
-      const vw = videoEl.videoWidth || 960;
-      const vh = videoEl.videoHeight || 540;
-      if (canvas.width !== vw || canvas.height !== vh) {
-        canvas.width = vw;
-        canvas.height = vh;
+      // キャンバスを動画に合わせる
+      if (canvas.width !== videoEl.videoWidth || canvas.height !== videoEl.videoHeight) {
+        canvas.width = videoEl.videoWidth || 960;
+        canvas.height = videoEl.videoHeight || 540;
       }
 
-      // 背景に動画を描画
       ctx.clearRect(0,0,canvas.width,canvas.height);
       ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
 
       try {
-        // ★毎フレーム推論（間引きなし）
         const poses = await detectorRef.current.estimatePoses(videoEl, { maxPoses: 1, flipHorizontal: false });
-
         if (poses[0]?.keypoints?.length) {
-          // videoEl座標系＝canvas座標系なのでスケール=1
-          const kpsScaled = poses[0].keypoints; // そのまま
+          // 骨格描画
+          drawKeypoints(ctx, poses[0].keypoints);
 
-          // 常に骨格を描画（見栄え優先）
-          drawKeypoints(ctx, kpsScaled);
-
-          // 角度計算
-          const kp = Object.fromEntries(kpsScaled.map(k => [k.name, k]));
+          // 角度算出
+          const kp = Object.fromEntries(poses[0].keypoints.map(k => [k.name, k]));
           const LHIP = kp["left_hip"],  LKN = kp["left_knee"],  LAN = kp["left_ankle"];
           const RHIP = kp["right_hip"], RKN = kp["right_knee"], RAN = kp["right_ankle"];
           const LSH  = kp["left_shoulder"],  RSH = kp["right_shoulder"];
@@ -260,16 +232,20 @@ export default function App() {
             const dKnee = (kneeLSm!=null && kneeRSm!=null) ? Math.abs(kneeLSm - kneeRSm) : null;
             const dHip  = (hipLSm!=null  && hipRSm!=null ) ? Math.abs(hipLSm  - hipRSm ) : null;
 
-            // HUD
+            // HUD（明るめ背景に馴染む淡色）
             ctx.save();
-            ctx.fillStyle = "rgba(255,255,255,0.88)";
-            ctx.fillRect(10, 10, 300, 112);
-            ctx.fillStyle = "#111";
+            ctx.fillStyle = "rgba(255,255,255,0.90)";
+            ctx.strokeStyle = "rgba(42,110,187,0.15)";
+            ctx.lineWidth = 1;
+            ctx.fillRect(10, 10, 320, 112);
+            ctx.strokeRect(10, 10, 320, 112);
+
+            ctx.fillStyle = "#2A2A2A";
             ctx.font = "16px system-ui, sans-serif";
             const f = (v)=> v==null ? "-" : v.toFixed(1);
-            ctx.fillText(`左膝: ${f(kneeLSm)}°   右膝: ${f(kneeRSm)}°   差: ${f(dKnee)}°`, 20, 36);
-            ctx.fillText(`左股: ${f(hipLSm)}°    右股: ${f(hipRSm)}°    差: ${f(dHip)}°`,   20, 58);
-            ctx.fillText(`体幹前傾: ${f(trunkSm)}°`, 20, 82);
+            ctx.fillText(`左膝: ${f(kneeLSm)}°   右膝: ${f(kneeRSm)}°   差: ${f(dKnee)}°`, 20, 38);
+            ctx.fillText(`左股: ${f(hipLSm)}°    右股: ${f(hipRSm)}°    差: ${f(dHip)}°`,   20, 62);
+            ctx.fillText(`体幹前傾: ${f(trunkSm)}°`, 20, 86);
             ctx.restore();
 
             // 記録（10Hz）
@@ -285,7 +261,7 @@ export default function App() {
                   dKnee, dHip,
                 });
                 lastSampleTimeRef.current = now;
-                setChartTick(n => n + 1);
+                setChartTick(n => n + 1); // グラフ更新
               }
             }
           }
@@ -293,12 +269,13 @@ export default function App() {
       } catch (e) {
         console.warn("estimatePoses error:", e?.message || e);
       }
+
       rafRef.current = requestAnimationFrame(render);
     };
     render();
   };
 
-  // ----- 再生コントロール（アップロード動画向け） -----
+  // 再生コントロール（アップロード動画向け）
   const playPause = () => {
     const v = fileVideoRef.current;
     if (!v) return;
@@ -318,7 +295,7 @@ export default function App() {
     if (v) v.playbackRate = s;
   };
 
-  // 今の samplesRef.current をディープコピーして保存
+  // 今の samplesRef.current を保存
   const saveCurrentAs = (role) => {
     if (!samplesRef.current.length) {
       alert("記録データがありません。先に『記録開始 → 停止』してください。");
@@ -329,7 +306,7 @@ export default function App() {
     if (role === "cmp") setCmpSamples(copy);
   };
 
-  // ★ 記録の開始/停止/クリア/CSV保存
+  // 記録開始/停止/クリア/CSV
   const toggleRecord = () => {
     setRecording((r) => {
       const next = !r;
@@ -342,24 +319,20 @@ export default function App() {
       return next;
     });
   };
-
   const clearRecord = () => {
     samplesRef.current = [];
     startTimeRef.current = 0;
     lastSampleTimeRef.current = 0;
     setChartTick(n => n+1);
   };
-
   const downloadCSV = () => {
-    const rows = [
-      ["t(s)","kneeL","kneeR","hipL","hipR","trunk","dKnee","dHip"]
-    ];
+    const rows = [["t(s)","kneeL","kneeR","hipL","hipR","trunk","dKnee","dHip"]];
     for (const s of samplesRef.current) {
       rows.push([
         s.t,
-        n(s.kneeL), n(s.kneeR),
-        n(s.hipL),  n(s.hipR),
-        n(s.trunk), n(s.dKnee), n(s.dHip)
+        n3(s.kneeL), n3(s.kneeR),
+        n3(s.hipL),  n3(s.hipR),
+        n3(s.trunk), n3(s.dKnee), n3(s.dHip)
       ]);
     }
     const csv = rows.map(r => r.join(",")).join("\n");
@@ -373,24 +346,19 @@ export default function App() {
     a.remove();
     URL.revokeObjectURL(url);
   };
-  const n = (v)=> v==null ? "" : v.toFixed(3);
+  const n3 = (v)=> v==null ? "" : v.toFixed(3);
 
-  // ★ 下段の記録グラフ（色付き）
+  // ★ 実況グラフ（色分け）
   const chartData = useMemo(() => {
     const s = samplesRef.current;
     return {
       labels: s.map(x => x.t),
       datasets: [
-        { label: "左膝角度 (°)",     data: s.map(x => x.kneeL ?? null), borderWidth: 2, pointRadius: 0,
-          borderColor: COLOR_MAP.kneeL, backgroundColor: COLOR_MAP.kneeL },
-        { label: "右膝角度 (°)",     data: s.map(x => x.kneeR ?? null), borderWidth: 2, pointRadius: 0,
-          borderColor: COLOR_MAP.kneeR, backgroundColor: COLOR_MAP.kneeR },
-        { label: "左股関節角度 (°)", data: s.map(x => x.hipL  ?? null), borderWidth: 2, pointRadius: 0,
-          borderColor: COLOR_MAP.hipL,  backgroundColor: COLOR_MAP.hipL },
-        { label: "右股関節角度 (°)", data: s.map(x => x.hipR  ?? null), borderWidth: 2, pointRadius: 0,
-          borderColor: COLOR_MAP.hipR,  backgroundColor: COLOR_MAP.hipR },
-        { label: "体幹前傾 (°)",     data: s.map(x => x.trunk ?? null),  borderWidth: 2, pointRadius: 0,
-          borderColor: COLOR_MAP.trunk, backgroundColor: COLOR_MAP.trunk },
+        { label: "左膝角度 (°)",   data: s.map(x => x.kneeL ?? null), borderWidth: 2, pointRadius: 0, borderColor:"#2A6EBB" },
+        { label: "右膝角度 (°)",   data: s.map(x => x.kneeR ?? null), borderWidth: 2, pointRadius: 0, borderColor:"#00A8E8" },
+        { label: "左股関節角度 (°)", data: s.map(x => x.hipL  ?? null), borderWidth: 2, pointRadius: 0, borderColor:"#7CC5EB" },
+        { label: "右股関節角度 (°)", data: s.map(x => x.hipR  ?? null), borderWidth: 2, pointRadius: 0, borderColor:"#8FD3FF" },
+        { label: "体幹前傾 (°)",   data: s.map(x => x.trunk ?? null),  borderWidth: 2, pointRadius: 0, borderColor:"#4F9FD8" },
       ],
     };
   }, [chartTick]);
@@ -400,16 +368,13 @@ export default function App() {
     maintainAspectRatio: false,
     animation: false,
     scales: {
-      x: { title: { display: true, text: "時間 (秒)" }, grid: { color: "#eee" }, ticks:{ color:"#333" } },
-      y: { title: { display: true, text: "角度 (°)"   }, grid: { color: "#eee" }, ticks:{ color:"#333" } },
+      x: { title: { display: true, text: "時間 (秒)" } },
+      y: { title: { display: true, text: "角度 (°)" } },
     },
-    plugins: {
-      legend: { position: "top", labels: { usePointStyle: true, boxWidth: 10 } },
-      tooltip: { callbacks: { label: (ctx) => `${ctx.dataset.label}: ${ctx.formattedValue}°` } }
-    },
+    plugins: { legend: { position: "top" } },
   };
 
-  // ---------- 比較ロジック（コールバック） ----------
+  // 比較ロジック
   const runCompareMulti = useCallback(() => {
     if (!refSamples || !cmpSamples) return;
 
@@ -419,7 +384,7 @@ export default function App() {
     const stats = { mode: cycleNormalize ? "cycle" : "time" };
 
     if (cycleNormalize) {
-      // サイクル正規化（複数サイクル→平均波形）
+      // 「動きを1回分に揃えて、平均したフォームで比較」
       const refT = refSamples.map(s=>s.t), cmpT = cmpSamples.map(s=>s.t);
 
       for (const key of metricsList) {
@@ -440,17 +405,14 @@ export default function App() {
         for (const c of cmpC) c.normV.forEach((v,i)=> avgCmp[i] += v/cmpC.length);
 
         rmseRes[key] = rmse(avgRef, avgCmp);
-        res.labels = refC[0].normT.map(x => (x*100).toFixed(0));
-        const col = COLOR_MAP[key] || "#666";
-        res.datasets.push({
-          label:`お手本:${key}`, data:avgRef, borderWidth:2.5, pointRadius:0,
-          borderColor: col, backgroundColor: col
-        });
-        res.datasets.push({
-          label:`比較:${key}`,   data:avgCmp, borderWidth:2.5, pointRadius:0,
-          borderColor: col, backgroundColor: col, borderDash:[6,4]
-        });
 
+        res.labels = refC[0].normT.map(x => (x*100).toFixed(0));
+        // 色割り当て
+        const color = metricColor(key);
+        res.datasets.push({ label:`お手本:${labelJP(key)}`, data:avgRef, borderWidth:2, pointRadius:0, borderColor:color });
+        res.datasets.push({ label:`比較:${labelJP(key)}`,   data:avgCmp, borderWidth:2, pointRadius:0, borderColor:color, borderDash:[6,4] });
+
+        // サイクル統計（揃えた後の各区間の秒数）
         stats.ref = {
           count: refC.length,
           avg:  avg(refC.map(c=>c.dur)),
@@ -469,7 +431,7 @@ export default function App() {
         };
       }
     } else {
-      // 時系列そのまま比較（ref の時刻に cmp を補間）
+      // 時間ベースで比較（ref の時刻に cmp を補間）
       const refT = refSamples.map(s=>s.t);
       const cmpT = cmpSamples.map(s=>s.t);
       res.labels = refT.map(t => t.toFixed(2));
@@ -477,24 +439,17 @@ export default function App() {
       for (const key of metricsList) {
         const refY   = refSamples.map(s => s[key] ?? null);
         const cmpYraw= cmpSamples.map(s => s[key] ?? null);
-
-        const cmpYseries = fillNaLinear(cmpT, cmpYraw);            // 欠損軽補間
-        const cmpY = refT.map(t => linInterp(t, cmpT, cmpYseries)); // 時間合わせ
+        const cmpYseries = fillNaLinear(cmpT, cmpYraw);
+        const cmpY = refT.map(t => linInterp(t, cmpT, cmpYseries));
 
         rmseRes[key] = rmse(
           refY.filter(v => v != null),
           cmpY.filter(v => v != null)
         );
 
-        const col = COLOR_MAP[key] || "#666";
-        res.datasets.push({
-          label:`お手本:${key}`, data: refY, borderWidth:2.5, pointRadius:0,
-          borderColor: col, backgroundColor: col
-        });
-        res.datasets.push({
-          label:`比較:${key}`,   data: cmpY, borderWidth:2.5, pointRadius:0,
-          borderColor: col, backgroundColor: col, borderDash:[6,4]
-        });
+        const color = metricColor(key);
+        res.datasets.push({ label:`お手本:${labelJP(key)}`, data: refY, borderWidth:2, pointRadius:0, borderColor:color });
+        res.datasets.push({ label:`比較:${labelJP(key)}`,   data: cmpY, borderWidth:2, pointRadius:0, borderColor:color, borderDash:[6,4] });
       }
     }
 
@@ -502,126 +457,118 @@ export default function App() {
       setCompareResult(null);
       setCompareStats(null);
       alert("比較に必要なデータが得られませんでした。記録時間を少し長くするか、指標を減らして再試行してください。");
-    } else {
-      setCompareRmse(rmseRes);
-      setCompareResult({ chartData: res });
-      setCompareStats(stats);
-      if (autoCoach) generateCoachNotes(rmseRes, stats, metrics, cycleNormalize);
+      return;
     }
-  }, [refSamples, cmpSamples, metrics, cycleNormalize, autoCoach]);
+    setCompareRmse(rmseRes);
+    setCompareResult({ chartData: res });
+    setCompareStats(stats);
+  }, [refSamples, cmpSamples, metrics, cycleNormalize]);
 
-  // ---- 生成AIコメント（まずはローカルのヒューリスティックで） ----
-  const generateCoachNotes = useCallback(
-    (rmse = compareRmse, stats = compareStats, enabled = metrics, mode = cycleNormalize) => {
-      try {
-        setCoachError(null);
-        setCoachLoading(true);
-        const text = buildHeuristicNotes(rmse, stats, enabled, mode);
-        setCoachNotes(text);
-      } catch (e) {
-        setCoachError(e?.message || String(e));
-      } finally {
-        setCoachLoading(false);
-      }
-    },
-    [compareRmse, compareStats, metrics, cycleNormalize]
-  );
+  const labelJP = (key) => ({
+    kneeL:"左膝", kneeR:"右膝", hipL:"左股", hipR:"右股", trunk:"体幹前傾"
+  }[key] || key);
 
-  // ---- UI ----
+  const metricColor = (key) => ({
+    kneeL:"#2A6EBB",
+    kneeR:"#00A8E8",
+    hipL:"#7CC5EB",
+    hipR:"#8FD3FF",
+    trunk:"#4F9FD8"
+  }[key] || "#6DBFF2");
+
+  // ------------------- UI -------------------
   return (
-    <div style={{ fontFamily:"system-ui, sans-serif", padding:16 }}>
-      <h1>SORA LAB フォーム可視化（PoC）</h1>
+    <div style={{
+      fontFamily:"'Segoe UI','Hiragino Sans',sans-serif",
+      padding:16,
+      background:"linear-gradient(to bottom, #E6F6FF, #FFFFFF)",
+      minHeight:"100vh"
+    }}>
+      <h1 style={{ color:"#2A6EBB", textAlign:"center", marginBottom:20 }}>
+        ☁️ SORA LAB フォーム可視化
+      </h1>
 
+      {/* カメラ/動画読込 */}
       <div style={{ display:"flex", gap:12, flexWrap:"wrap", alignItems:"center" }}>
-        <button onClick={startCamera} disabled={useCamera}>カメラ開始</button>
-        <label style={{ border:"1px solid #ccc", padding:"8px 12px", cursor:"pointer" }}>
+        <button style={buttonStyle} onClick={startCamera} disabled={useCamera}>カメラ開始</button>
+        <label style={{ ...buttonStyle, cursor:"pointer" }}>
           動画ファイル読込
           <input type="file" accept="video/*" onChange={loadFile} style={{ display:"none" }} />
         </label>
-        <button onClick={stop}>停止</button>
+        <button style={buttonStyle} onClick={stop}>停止</button>
       </div>
 
       {/* アップロード動画の再生コントロール */}
       {!useCamera && (
         <div style={{ marginTop:10, display:"flex", gap:8, alignItems:"center", flexWrap:"wrap" }}>
-          <button onClick={playPause}>{playing ? "⏸ 一時停止" : "▶ 再生"}</button>
-          <button onClick={replay}>⟲ リプレイ</button>
+          <button style={buttonStyle} onClick={playPause}>{playing ? "⏸ 一時停止" : "▶ 再生"}</button>
+          <button style={buttonStyle} onClick={replay}>⟲ リプレイ</button>
           <span>速度:</span>
           {[0.25, 0.5, 0.75, 1].map(s => (
-            <button key={s} onClick={()=>changeSpeed(s)} disabled={speed===s}>{s}x</button>
-          ))}
+           <button
+             key={s}
+             onClick={() => changeSpeed(s)}
+             style={{
+               marginRight: 4,
+               padding: "4px 10px",
+               borderRadius: 6,
+               border: "1px solid #6DBFF2",
+               cursor: "pointer",
+               background: speed === s ? "#2A6EBB" : "#6DBFF2", // 選択中は濃い空色
+               color: "white",
+               fontWeight: speed === s ? "bold" : "normal"
+             }}
+           >
+             {s}x
+           </button>
+         ))}
         </div>
       )}
 
-      {/* ★ 記録系のUI */}
+      {/* 記録系UI */}
       <div style={{ marginTop:10, display:"flex", gap:8, alignItems:"center", flexWrap:"wrap" }}>
-        <button onClick={toggleRecord} style={{ fontWeight: 700 }}>
+        <button style={{...buttonStyle, fontWeight:700}} onClick={toggleRecord}>
           {recording ? "■ 記録停止" : "● 記録開始"}
         </button>
-        <button onClick={clearRecord} disabled={!samplesRef.current.length}>記録クリア</button>
-        <button onClick={downloadCSV} disabled={!samplesRef.current.length}>CSVダウンロード</button>
-        <span style={{ color:"#666" }}>
-          サンプル数: {samplesRef.current.length}
-        </span>
+        <button style={buttonStyle} onClick={clearRecord} disabled={!samplesRef.current.length}>記録クリア</button>
+        <button style={buttonStyle} onClick={downloadCSV} disabled={!samplesRef.current.length}>CSVダウンロード</button>
+        <span style={{ color:"#333" }}>サンプル数: {samplesRef.current.length}</span>
       </div>
 
-      {/* 保存ボタン */}
+      {/* 保存 */}
       <div style={{ marginTop:10, display:"flex", gap:8, flexWrap:"wrap", alignItems:"center" }}>
-        <button onClick={()=>saveCurrentAs("ref")} disabled={!samplesRef.current.length}>この記録を「お手本」に保存</button>
-        <button onClick={()=>saveCurrentAs("cmp")} disabled={!samplesRef.current.length}>この記録を「比較」に保存</button>
-
+        <button style={buttonStyle} onClick={()=>saveCurrentAs("ref")} disabled={!samplesRef.current.length}>この記録を「お手本」に保存</button>
+        <button style={buttonStyle} onClick={()=>saveCurrentAs("cmp")} disabled={!samplesRef.current.length}>この記録を「比較」に保存</button>
         <span style={{marginLeft:8, color:"#333"}}>
           保存状況：お手本 {refSamples? "✅": "❌"} / 比較 {cmpSamples? "✅": "❌"}
         </span>
       </div>
 
       {/* 比較パネル */}
-      <div style={{marginTop:12, padding:12, border:"1px solid #eee", borderRadius:8}}>
-        {/* 指標の選択 & オプション */}
+      <div style={{
+        marginTop:12, padding:12,
+        border:"1px solid #CCE7F5",
+        borderRadius:12,
+        background:"#fff",
+        boxShadow:"0 2px 6px rgba(0,0,0,0.05)"
+      }}>
+        {/* 指標選択 & オプション */}
         <div style={{display:'flex', gap:12, flexWrap:'wrap', alignItems:'center'}}>
-          {[
-            {key:'kneeL', label:'左膝'}, {key:'kneeR', label:'右膝'},
-            {key:'hipL',  label:'左股'}, {key:'hipR',  label:'右股'},
-            {key:'trunk', label:'体幹前傾'},
-          ].map(m => (
-            <label key={m.key}>
-              <input
-                type="checkbox"
-                checked={metrics[m.key] ?? true}
-                onChange={e => setMetrics(v => ({ ...v, [m.key]: e.target.checked }))}
-              />
-              {m.label}
-            </label>
+          {[{key:'kneeL',label:'左膝'},{key:'kneeR',label:'右膝'},{key:'hipL',label:'左股'},{key:'hipR',label:'右股'},{key:'trunk',label:'体幹前傾'}]
+            .map(m=>(
+              <label key={m.key}><input type="checkbox" checked={metrics[m.key]??true}
+              onChange={e=>setMetrics(v=>({...v,[m.key]:e.target.checked}))}/> {m.label}</label>
           ))}
-
           <label style={{marginLeft:8}}>
-            <input
-              type="checkbox"
-              checked={cycleNormalize}
-              onChange={e => setCycleNormalize(e.target.checked)}
-            />
-            動きを1回分に揃えて、平均したフォームで比較
-            <span style={{ fontSize:"0.85em", color:"#666", marginLeft:4 }}>
-              （速さの違いを気にせず、フォームそのものを比べられます）
-            </span>
+            <input type="checkbox" checked={cycleNormalize} onChange={e=>setCycleNormalize(e.target.checked)}/>
+            動きを1回分に揃えて比較（平均フォーム）
           </label>
-
-          <button onClick={runCompareMulti} disabled={!refSamples || !cmpSamples}>
-            比較（グラフ）
-          </button>
-
-          <label style={{marginLeft:8}}>
-            <input type="checkbox" checked={autoCoach} onChange={e=>setAutoCoach(e.target.checked)} />
-            比較後にAIコメントを自動生成
-          </label>
-          <button onClick={()=>generateCoachNotes()} disabled={!compareResult && !compareStats} >
-            AIコメントを生成
-          </button>
+          <button style={buttonStyle} onClick={runCompareMulti} disabled={!refSamples||!cmpSamples}>比較（グラフ）</button>
 
           {compareResult && (
             <span style={{marginLeft:8}}>
-              {Object.entries(compareRmse).map(([k,v]) => (
-                <span key={k} style={{marginRight:10}}>{k}: RMSE {v?.toFixed(2)}°</span>
+              {Object.entries(compareRmse).map(([k,v])=>(
+                <span key={k} style={{marginRight:10}}>{labelJP(k)}: RMSE {v?.toFixed(2)}°</span>
               ))}
             </span>
           )}
@@ -655,16 +602,20 @@ export default function App() {
 
         {/* 比較グラフ */}
         {compareResult && (
-          <div style={{ height: 280, marginTop: 8, background:"#fafafa", border:"1px solid #eee", borderRadius:8, padding:8 }}>
+          <div style={{
+            height: 280, marginTop: 8, background:"#FFFFFF",
+            border:"1px solid #CCE7F5", borderRadius:12, padding:8,
+            boxShadow:"0 2px 6px rgba(0,0,0,0.05)"
+          }}>
             <Line
               data={compareResult.chartData}
               options={{
                 responsive:true, maintainAspectRatio:false, animation:false,
                 scales:{
-                  x:{ title:{display:true, text: cycleNormalize ? 'サイクル(%)' : '時間(秒)'}, grid:{color:"#eee"}, ticks:{color:"#333"} },
-                  y:{ title:{display:true, text:'角度(°)'}, grid:{color:"#eee"}, ticks:{color:"#333"} }
+                  x:{ title:{display:true, text: cycleNormalize ? 'サイクル(%)' : '時間(秒)'} },
+                  y:{ title:{display:true, text:'角度(°)'} }
                 },
-                plugins:{ legend:{ position:'top', labels:{ usePointStyle:true, boxWidth:10 } } }
+                plugins:{ legend:{ position:'top' } }
               }}
             />
           </div>
@@ -675,96 +626,128 @@ export default function App() {
       <video ref={videoRef} playsInline muted style={{ display:"none" }} />
       <video ref={fileVideoRef} controls playsInline muted style={{ display:"none" }} />
 
+      {/* 右側プレビュー（動画＋骨格） */}
       <div style={{ marginTop:12 }}>
-        <canvas ref={canvasRef} style={{ width:"100%", maxWidth:960, background:"#eee", borderRadius:8 }} />
+        <canvas ref={canvasRef} style={{
+          width:"100%", maxWidth:960, background:"#fff", borderRadius:12,
+          boxShadow:"0 2px 6px rgba(0,0,0,0.05)"
+        }} />
       </div>
 
-      {/* ★ グラフ領域（記録可視化） */}
-      <div style={{ height: 260, marginTop: 12, background:"#fafafa", border:"1px solid #eee", borderRadius:8, padding:8 }}>
+      {/* ライブグラフ */}
+      <div style={{
+        height: 260, marginTop: 12, background:"#FFFFFF",
+        border:"1px solid #CCE7F5", borderRadius:12, padding:8,
+        boxShadow:"0 2px 6px rgba(0,0,0,0.05)"
+      }}>
         <Line data={chartData} options={chartOptions} />
       </div>
 
-      {/* 生成AIコメント表示 */}
-      {(coachLoading || coachError || coachNotes) && (
-        <div style={{marginTop:12, padding:12, border:"1px solid #eee", borderRadius:8, background:"#fffef8"}}>
-          <div style={{fontWeight:700, marginBottom:6}}>コーチからのひとこと</div>
-          {coachLoading && <div>考え中です… ⏳</div>}
-          {coachError && <div style={{color:"#b00020"}}>エラー: {coachError}</div>}
-          {coachNotes && coachNotes.split("\n").map((line,i)=>(
-            <p key={i} style={{margin:"6px 0"}}>{line}</p>
-          ))}
-        </div>
-      )}
-
-      <p style={{ marginTop:12, color:"#555" }}>
-        コツ：横から全身が入るように撮影（30fps以上）。明るい場所で。
+      {/* 補足 */}
+      <p style={{ marginTop:20, color:"#555", textAlign:"center" }}>
+        🌸 コツ：横から全身が入るように撮影すると、より正確に分析できます。<br/>
+        そっと寄り添う可視化で、あなたのフォームを応援します。
       </p>
+
+      {/* ▼ 指標の説明を追加 ▼ */}
+      <div style={{ marginTop:20, padding:12, background:"#f9f9f9", border:"1px solid #eee", borderRadius:8, fontSize:14, lineHeight:1.6 }}>
+        <h3 style={{ marginTop:0, fontSize:16, color:"#333" }}>📘 数値の意味（ソララボ式）</h3>
+        <ul style={{ paddingLeft:18, margin:0 }}>
+          <li><b>1歩のリズム（平均秒数）</b>：1歩にかかる時間の目安です。</li>
+          <li><b>リズムの安定度（SD）</b>：数字が小さいほど、動きが揃っていて安定しています。</li>
+          <li><b>いちばん速い動き（最短）</b>：最も速く脚が動いたときのリズムです。</li>
+          <li><b>いちばんゆっくりの動き（最長）</b>：最もゆっくりだったときのリズムです。</li>
+          <li><b>テンポ（ケイデンス）</b>：1分あたりの歩数。音楽のBPMのように走るテンポを表します。</li>
+        </ul>
+      </div>
     </div>
   );
 }
 
-// ---------- 比較ロジック関数（下請け） ----------
+// ---------- 補助関数（下にまとめて定義） ----------
 
 // 線形補間
 function linInterp(x, xp, yp) {
-  if (!xp.length || !yp.length) return null;
+  if (!xp || !yp || xp.length === 0 || yp.length === 0) return null;
   if (x <= xp[0]) return yp[0];
-  if (x >= xp[xp.length-1]) return yp[yp.length-1];
+  if (x >= xp[xp.length - 1]) return yp[yp.length - 1];
   let i = 1;
   while (i < xp.length && xp[i] < x) i++;
-  const x0 = xp[i-1], x1 = xp[i];
-  const y0 = yp[i-1], y1 = yp[i];
-  return y0 + (y1-y0) * (x-x0)/(x1-x0);
+  const x0 = xp[i - 1], x1 = xp[i];
+  const y0 = yp[i - 1], y1 = yp[i];
+  if (x1 === x0) return y0;
+  return y0 + (y1 - y0) * (x - x0) / (x1 - x0);
 }
 
-// 補間用に null を軽く埋める（端は最近傍、内部は線形）
-function fillNaLinear(xp, yp) {
-  const y = yp.slice();
-  let i = 0; while (i < y.length && y[i] == null) i++;
-  if (i > 0 && i < y.length) for (let k = 0; k < i; k++) y[k] = y[i];
-  let j = y.length - 1; while (j >= 0 && y[j] == null) j--;
-  if (j >= 0 && j < y.length - 1) for (let k = j + 1; k < y.length; k++) y[k] = y[j];
-  for (let a = 0; a < y.length; a++) if (y[a] == null) {
-    let b = a; while (b < y.length && y[b] == null) b++;
-    const y0 = y[a - 1], y1 = y[b], x0 = xp[a - 1], x1 = xp[b];
-    for (let k = a; k < b; k++) y[k] = y0 + (y1 - y0) * (xp[k] - x0) / (x1 - x0);
-    a = b;
+// null を簡易補間（端は最近傍、内部は線形）
+function fillNaLinear(times, values) {
+  const y = values.slice();
+  const n = y.length;
+  if (n === 0) return y;
+
+  let i = 0;
+  while (i < n && (y[i] == null || !isFinite(y[i]))) i++;
+  if (i > 0 && i < n) for (let k = 0; k < i; k++) y[k] = y[i];
+
+  let j = n - 1;
+  while (j >= 0 && (y[j] == null || !isFinite(y[j]))) j--;
+  if (j >= 0 && j < n - 1) for (let k = j + 1; k < n; k++) y[k] = y[j];
+
+  let a = 0;
+  while (a < n) {
+    if (y[a] == null || !isFinite(y[a])) {
+      let b = a;
+      while (b < n && (y[b] == null || !isFinite(y[b]))) b++;
+      if (a > 0 && b < n) {
+        const y0 = y[a - 1], y1 = y[b];
+        const x0 = times[a - 1], x1 = times[b];
+        const dx = (x1 - x0) || 1e-9;
+        for (let k = a; k < b; k++) y[k] = y0 + (y1 - y0) * (times[k] - x0) / dx;
+      }
+      a = b;
+    } else {
+      a++;
+    }
   }
   return y;
 }
 
-// 極小値（谷）の検出：時間ベース
-function findLocalMinima(t, y, {prominence=8, minGapSec=0.35} = {}) {
+// 極小値（谷）の検出
+function findLocalMinima(times, values, { prominence = 8, minGapSec = 0.35 } = {}) {
   const idxs = [];
-  for (let i = 1; i < y.length - 1; i++) {
-    if (y[i] <= y[i-1] && y[i] <= y[i+1]) idxs.push(i);
+  for (let i = 1; i < values.length - 1; i++) {
+    if (values[i] <= values[i - 1] && values[i] <= values[i + 1]) idxs.push(i);
   }
   const kept = [];
-  let lastKeepT = -1e9;
+  let lastKeepT = -1e12;
   for (const i of idxs) {
-    const left = Math.max(0, i-10), right = Math.min(y.length-1, i+10);
-    const leftMax  = Math.max(...y.slice(left, i));
-    const rightMax = Math.max(...y.slice(i+1, right+1));
-    const prom = Math.min(leftMax - y[i], rightMax - y[i]);
-    if (prom >= prominence && (t[i] - lastKeepT) >= minGapSec) {
+    const left = Math.max(0, i - 10);
+    const right = Math.min(values.length - 1, i + 10);
+    const leftMax = Math.max(...values.slice(left, i));
+    const rightMax = Math.max(...values.slice(i + 1, right + 1));
+    const prom = Math.min(leftMax - values[i], rightMax - values[i]);
+    if (prom >= prominence && (times[i] - lastKeepT) >= minGapSec) {
       kept.push(i);
-      lastKeepT = t[i];
+      lastKeepT = times[i];
     }
   }
-  return kept; // 返り値はインデックス配列
+  return kept;
 }
 
-// サイクルごとの正規化 (0-100%)
-function cyclesNormalize(times, values, peaks, N=100) {
+// サイクル正規化(0-100%)
+function cyclesNormalize(times, values, peaks, N = 100) {
   const cycles = [];
-  for (let c=0; c<peaks.length-1; c++) {
-    const t0 = times[peaks[c]], t1 = times[peaks[c+1]];
-    const normT = Array.from({length:N}, (_,i)=>i/(N-1));
+  if (!peaks || peaks.length < 2) return cycles;
+  for (let c = 0; c < peaks.length - 1; c++) {
+    const i0 = peaks[c], i1 = peaks[c + 1];
+    const t0 = times[i0], t1 = times[i1];
+    if (t1 <= t0) continue;
+    const normT = Array.from({ length: N }, (_, i) => i / (N - 1));
     const normV = normT.map(frac => {
-      const targetT = t0 + frac*(t1-t0);
+      const targetT = t0 + frac * (t1 - t0);
       return linInterp(targetT, times, values);
     });
-    cycles.push({normT, normV, dur:t1-t0});
+    cycles.push({ normT, normV, dur: t1 - t0 });
   }
   return cycles;
 }
@@ -772,59 +755,28 @@ function cyclesNormalize(times, values, peaks, N=100) {
 // RMSE
 function rmse(arr1, arr2) {
   const n = Math.min(arr1.length, arr2.length);
-  if (n===0) return null;
-  let s=0; for (let i=0;i<n;i++){const d=arr1[i]-arr2[i]; s+=d*d;}
-  return Math.sqrt(s/n);
+  if (n === 0) return null;
+  let s = 0, c = 0;
+  for (let i = 0; i < n; i++) {
+    const a = arr1[i], b = arr2[i];
+    if (a == null || b == null || !isFinite(a) || !isFinite(b)) continue;
+    const d = a - b;
+    s += d * d;
+    c++;
+  }
+  return c ? Math.sqrt(s / c) : null;
 }
 
-// 平均と標準偏差
-function avg(arr){return arr.reduce((a,b)=>a+b,0)/arr.length;}
-function stdev(arr){const m=avg(arr);return Math.sqrt(avg(arr.map(v=>(v-m)**2)));}
-
-// ---- 生成AIコメント用ヘルパ ----
-function formatDeg(v) { return (v==null || isNaN(v)) ? "-" : `${v.toFixed(1)}°`; }
-function levelFromRmse(v){
-  if (v == null) return "info";
-  if (v < 10) return "good";
-  if (v < 20) return "ok";
-  if (v < 30) return "warn";
-  return "alert";
+function avg(arr) {
+  const v = arr.filter(x => x != null && isFinite(x));
+  if (!v.length) return 0;
+  return v.reduce((a, b) => a + b, 0) / v.length;
 }
-function bullet(prefix, text){ return `${prefix} ${text}`; }
 
-// stats: {mode:'cycle'|'time', ref:{count,avg,sd,min,max,cadence}, cmp:{...}}
-function buildHeuristicNotes(rmse, stats, enabledKeys, mode) {
-  const lines = [];
-  lines.push("いつもおつかれさまです。今日の計測をもとに、やさしく振り返ってみましょう。");
-
-  const keys = ["kneeL","kneeR","hipL","hipR","trunk"].filter(k=>enabledKeys[k]);
-  const map = { kneeL:"左膝", kneeR:"右膝", hipL:"左股関節", hipR:"右股関節", trunk:"体幹前傾" };
-  for (const k of keys) {
-    const v = rmse?.[k]; if (v == null) continue;
-    const level = levelFromRmse(v);
-    if (level === "good")   lines.push(bullet("✅", `${map[k]}はお手本に近い動き（RMSE ${formatDeg(v)}）。この調子！`));
-    if (level === "ok")     lines.push(bullet("☑️", `${map[k]}はまずまず一致（RMSE ${formatDeg(v)}）。リズムを揃えるとさらに良くなりそう。`));
-    if (level === "warn")   lines.push(bullet("⚠️", `${map[k]}の差がやや大きめ（RMSE ${formatDeg(v)}）。可動域のピーク付近で左右差が出ている可能性。`));
-    if (level === "alert")  lines.push(bullet("❗", `${map[k]}の差が大きい傾向（RMSE ${formatDeg(v)}）。フォームの要点を一つに絞って練習しましょう。`));
-  }
-
-  if (stats?.mode === "cycle" && stats.ref && stats.cmp) {
-    const cadRef = stats.ref.cadence, cadCmp = stats.cmp.cadence;
-    const diff = (cadRef && cadCmp) ? Math.abs(cadRef - cadCmp) : null;
-    if (diff != null) {
-      if (diff < 2) lines.push(bullet("🎵", `ケイデンスはお手本に近いです（${cadCmp.toFixed(1)} 回/分）。リズムは良好！`));
-      else lines.push(bullet("🫧", `ケイデンスに差があります（お手本 ${cadRef.toFixed(1)} / 比較 ${cadCmp.toFixed(1)} 回/分）。テンポ合わせを意識しましょう。`));
-    }
-    lines.push(bullet("⏱️", `1サイクルの平均：お手本 ${stats.ref.avg.toFixed(2)}s / 比較 ${stats.cmp.avg.toFixed(2)}s`));
-  } else if (mode === false) {
-    lines.push(bullet("ℹ️", "今回は時間比較です。必要に応じて『動きを1回分に揃えて、平均したフォームで比較』をONにすると、リズム差を除いた形で波形比較ができます。"));
-  }
-
-  lines.push("次回のおすすめ：");
-  if (keys.includes("kneeL") || keys.includes("kneeR")) lines.push(bullet("・", "膝角度は“曲げピークの深さとタイミング”を合わせる意識で。"));
-  if (keys.includes("trunk")) lines.push(bullet("・", "体幹は“胸の向き”を固定し、股関節で前傾を作ると安定します。"));
-  lines.push(bullet("・", "1～2項目に絞って撮影し、5～10サイクルほど計測してみましょう。"));
-  lines.push("無理せず、少しずつ。今日もよくできました！");
-
-  return lines.join("\n");
+function stdev(arr) {
+  const v = arr.filter(x => x != null && isFinite(x));
+  if (v.length <= 1) return 0;
+  const m = avg(v);
+  const s2 = v.reduce((acc, x) => acc + (x - m) ** 2, 0) / v.length;
+  return Math.sqrt(s2);
 }
