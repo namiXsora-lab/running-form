@@ -1,0 +1,30 @@
+{
+  "dev": {
+    "awscloudformation": {
+      "AuthRoleName": "amplify-soraformpoc-dev-b5d20-authRole",
+      "UnauthRoleArn": "arn:aws:iam::394504785225:role/amplify-soraformpoc-dev-b5d20-unauthRole",
+      "AuthRoleArn": "arn:aws:iam::394504785225:role/amplify-soraformpoc-dev-b5d20-authRole",
+      "Region": "ap-northeast-1",
+      "DeploymentBucketName": "amplify-soraformpoc-dev-b5d20-deployment",
+      "UnauthRoleName": "amplify-soraformpoc-dev-b5d20-unauthRole",
+      "StackName": "amplify-soraformpoc-dev-b5d20",
+      "StackId": "arn:aws:cloudformation:ap-northeast-1:394504785225:stack/amplify-soraformpoc-dev-b5d20/c10ce4c0-c872-11f0-bfdb-0a6e17858989",
+      "AmplifyAppId": "d16vgi7rbk1iyt"
+    },
+    "categories": {
+      "auth": {
+        "soraformpoc3ee3e721": {}
+      },
+      "function": {
+        "stripeWebhook": {
+          "deploymentBucketName": "amplify-soraformpoc-dev-b5d20-deployment",
+          "s3Key": "amplify-builds/stripeWebhook-2f7956722b322b735a69-build.zip"
+        },
+        "stripeCheckout": {
+          "deploymentBucketName": "amplify-soraformpoc-dev-b5d20-deployment",
+          "s3Key": "amplify-builds/stripeCheckout-6a576d716a44496a5245-build.zip"
+        }
+      }
+    }
+  }
+}
