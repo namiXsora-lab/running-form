@@ -9,8 +9,7 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "predeploy": "npm run build",
-    "deploy": "gh-pages -d dist",
-    "postbuild": "copy dist\\index.html dist\\404.html"
+    "deploy": "gh-pages -d dist"
   },
   "dependencies": {
     "@tensorflow-models/pose-detection": "^2.1.3",
